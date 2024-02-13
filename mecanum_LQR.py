@@ -5,56 +5,46 @@ import numpy as np
 import scipy.linalg as la
 import pathlib
 from kinematic_mecanum import mecanum
-from lqr_controller import LQR_ControllerV2
+from lqr_controller import LQR_ControllerV2,LQR_Controller
+from bezier_path import calc_4points_bezier_path
 
 # from utils.angle import angle_mod
 sys.path.append(str(pathlib.Path(__file__).parent.parent.parent))
 import cubic_spline_planner
-# from PathPlanning.CubicSpline import cubic_spline_planner
 
-# === Parameters =====
-
-# LQR parameter
-lqr_Q = 100*np.eye(6)
-lqr_R = 0.01*np.eye(6)
-dt = 0.1  # time tick[s]
-L = 0.5  # Wheel base of the vehicle [m]
-max_steer = np.deg2rad(45.0)  # maximum steering angle[rad]
+max_linear_velocity = 3.0 # meters per second
+max_angular_velocity = 1.5708 # radians per second
 lx = 0.165
 ly = 0.225 
+dt = 0.01
 R = 0.076
-show_animation = True
+sim_time = 350
+start_x = 0.0
+start_y = 0.0
+start_yaw = 0
+end_x = 6.0
+end_y = -3.4
+end_yaw = -1.57
+offset=1.6
+index=0
 
 
-class State:
 
-    def __init__(self, x=0.0, y=0.0, yaw=0.0, Vx=0.0, Vy=0.0,Omega=0.0):
-        self.x = x
-        self.y = y
-        self.yaw = yaw
-        self.Vx = Vx
-        self.Vy = Vy
-        self.Omega = Omega
+def getB(yaw, deltat):
+    
+    B = np.array([  [np.cos(yaw)*deltat, -np.sin(yaw)*deltat, 0],
+                                    [np.sin(yaw)*deltat, np.cos(yaw)*deltat, 0],
+                                    [0,0, deltat]])
+    return B
 
-def update(state, ax,ay,ayaw,W1,W2,W3,W4):
+def state_space_model(A, state_t_minus_1, B, control_input_t_minus_1):
 
-    if state.yaw >= max_steer:
-        state.yaw = max_steer
-    if state.yaw <= - max_steer:
-        state.yaw = - max_steer
-    mec = mecanum(R,lx,ly)
-    Vx,Vy,Omega = mec.forward_kinematic(W1,W2,W3,W4)
-    # state.x = state.x + Vx*np.cos(state.yaw)*dt - Vy*np.sin(state.yaw)*dt
-    # state.y = state.y + Vx*np.sin(state.yaw)*dt - Vy*np.cos(state.yaw)*dt
-    state.x = state.x + Vx*dt 
-    state.y = state.y + Vy*dt 
-    state.yaw = state.yaw + Omega * dt
-    state.Vx = state.Vx + ax * dt
-    state.Vy = state.Vy + ay * dt
-    state.Omega = state.Omega + ayaw * dt
+    control_input_t_minus_1[0,0] = np.clip(control_input_t_minus_1[0,0],-max_linear_velocity,max_linear_velocity)
+    control_input_t_minus_1[1,0] = np.clip(control_input_t_minus_1[1,0],-max_linear_velocity,max_linear_velocity)
+    control_input_t_minus_1[2,0] = np.clip(control_input_t_minus_1[2,0],-max_angular_velocity,max_angular_velocity)
+    state = A @ state_t_minus_1 + B @ control_input_t_minus_1
 
     return state
-
 def angle_mod(x, zero_2_2pi=False, degree=False):
     if isinstance(x, float):
         is_float = True
@@ -81,8 +71,8 @@ def pi_2_pi(angle):
     return angle_mod(angle)
 
 def calc_nearest_index(state, cx, cy, cyaw):
-    dx = [state.x - icx for icx in cx]
-    dy = [state.y - icy for icy in cy]
+    dx = [state[0,0] - icx for icx in cx]
+    dy = [state[1,0] - icy for icy in cy]
 
     d = [idx ** 2 + idy ** 2 for (idx, idy) in zip(dx, dy)]
 
@@ -92,199 +82,117 @@ def calc_nearest_index(state, cx, cy, cyaw):
 
     mind = math.sqrt(mind)
 
-    dxl = cx[ind] - state.x
-    dyl = cy[ind] - state.y
+    dxl = cx[ind] - state[0,0]
+    dyl = cy[ind] - state[1,0]
 
     angle = pi_2_pi(cyaw[ind] - math.atan2(dyl, dxl))
     if angle < 0:
         mind *= -1
 
     return ind, mind
-def lqr_speed_steering_control(state,cx,cy,cyaw,ck,spx,spy,spyaw,dt,Q,R):
-    ind,_= calc_nearest_index(state,cx,cy,cyaw)
-    k = ck[ind]
-    A = np.diag([1,1,1,1,1,1])
-    B = np.diag([dt,dt,dt,dt,dt,dt])
-    # B = np.zeros((6,6))
-    # B[0,0] = np.cos(cyaw)*dt
-    # B[0,1] = -np.sin(cyaw)*dt
-    # B[1,0] = np.sin(cyaw)*dt
-    # B[1,1] = np.cos(cyaw)*dt
-    # B[2,2] = dt
-    # B[3,3] = dt
-    # B[4,4] = dt
-    # B[5,5] = dt
-    # B = np.array([[np.cos(cyaw)*dt,-np.sin(cyaw)*dt,0.0,0.0,0.0,0.0],
-    #              [np.sin(cyaw)*dt, np.cos(cyaw)*dt ,0.0,0.0,0.0,0.0],
-    #              [0.0, 0.0, dt, 0.0, 0.0, 0.0],
-    #              [0.0, 0.0, 0.0, dt, 0.0, 0.0],
-    #              [0.0, 0.0, 0.0, 0.0, dt, 0.0],
-    #              [0.0, 0.0, 0.0, 0.0, 0.0, dt]])
-    errorx = (state.x - cx[ind])
-    errory = (state.y - cy[ind])
-    erroryaw = (state.yaw - cyaw[ind])
-    errorvx = (state.Vx - spx[ind])
-    errorvy = (state.Vy - spy[ind])
-    errorvyaw = (state.Omega - spyaw[ind])
-    error = np.zeros((6, 1))
-    error[0,0] = errorx
-    error[1,0] = errory
-    error[2,0] = erroryaw
-    error[3,0] = errorvx
-    error[4,0] = errorvy
-    error[5,0] = errorvyaw
-    LQR = LQR_ControllerV2(A,B,Q,R,150)
-    K,_,_ = LQR.dlqr()
-    U = -K @ error
-
-    # # calc steering input
-    # ff = math.atan2(L * k, 1)  # feedforward steering angle
-    # fb = pi_2_pi(U[2, 0])  # feedback steering angle
-    # delta = ff + fb
-    return U, ind
-def do_simulation(cx, cy, cyaw, ck, spx,spy,spyaw, goal):
-    T = 500.0  # max simulation time
-    goal_dis = 0.3
-    stop_speed = 0.05
-    mec = mecanum(R,lx,ly)
-    state = State(x=-0.0, y=-0.0, yaw=0.0, Vx=0.0, Vy=0.0,Omega= 0.0)
-
-    time = 0.0
-    x = [state.x]
-    y = [state.y]
-    yaw = [state.yaw]
-    Vx = [state.Vx]
-    Vy = [state.Vy]
-    Omega = [state.Omega]
-    t = [0.0]
-
-    
-
-    while T >= time:
-        U, target_ind = lqr_speed_steering_control(
-            state, cx, cy, cyaw, ck, spx,spy,spyaw,dt, lqr_Q, lqr_R)
-        w1,w2,w3,w4 = mec.inverse_kinematic(U[0,0],U[1,0],U[2,0])
-        state = update(state, U[3,0],U[4,0],U[5,0],w1,w2,w3,w4)
-
-        if abs(state.Vx) <= stop_speed:
-            target_ind += 1
-
-        time = time + dt
-
-        # check goal
-        dx = state.x - goal[0]
-        dy = state.y - goal[1]
-        if math.hypot(dx, dy) <= goal_dis:
-            print("Goal")
-            break
-
-        x.append(state.x)
-        y.append(state.y)
-        yaw.append(state.yaw)
-        Vx.append(state.Vx)
-        Vy.append(state.Vy)
-        Omega.append(state.Omega)
-        t.append(time)
-
-        if target_ind % 1 == 0 and show_animation:
-            plt.cla()
-            # for stopping simulation with the esc key.
-            plt.gcf().canvas.mpl_connect('key_release_event',
-                    lambda event: [exit(0) if event.key == 'escape' else None])
-            plt.plot(cx, cy, "-r", label="course")
-            plt.plot(x, y, "ob", label="trajectory")
-            plt.plot(cx[target_ind], cy[target_ind], "xg", label="target")
-            plt.axis("equal")
-            plt.grid(True)
-            plt.title("speed[km/h]:" + str(round(state.Vx * 3.6, 2))
-                      + ",target index:" + str(target_ind))
-            plt.pause(0.0001)
-
-    return t, x, y, yaw, Vx,Vy,Omega   
-def calc_speed_profile(cyaw, target_speed):
-    speed_profile = [target_speed] * len(cyaw)
-
-    direction = 1.0
-
-    # Set stop point
-    for i in range(len(cyaw) - 1):
-        dyaw = abs(cyaw[i + 1] - cyaw[i])
-        Vyaw = dyaw/dt
-        switch = math.pi / 4.0 <= dyaw < math.pi / 2.0
-
-        if switch:
-            direction *= -1
-
-        if direction != 1.0:
-            speed_profile[i] = - target_speed
-        else:
-            speed_profile[i] = target_speed
-
-        if switch:
-            speed_profile[i] = 0.0
-
-    # speed down
-    for i in range(40):
-        speed_profile[-i] = target_speed / (50 - i)
-        if speed_profile[-i] <= 1.0 / 3.6:
-            speed_profile[-i] = 1.0 / 3.6
-
-    return speed_profile
-ax = [0.0, 2.0,4.0,5.5, 6.2, 8.5, 9.0]
-ay = [0.0, 0.0,-0.0,-0.5, -3.2, -3.0, -1.0]
-goal = [ax[-1], ay[-1]]
-
-cx, cy, cyaw, ck, s = cubic_spline_planner.calc_spline_course(
-        ax, ay, ds=0.1)
-target_speed = 10.0 / 3.6 
+def plot_arrow(x, y, yaw, length=0.025, width=0.3, fc="b", ec="k"):
+    if not isinstance(x, float):
+        for (ix, iy, iyaw) in zip(x, y, yaw):
+            plot_arrow(ix, iy, iyaw)
+    else:
+        plt.arrow(x, y, length * np.cos(yaw), length * np.sin(yaw),
+            fc=fc, ec=ec, head_width=width, head_length=width)
+        plt.plot(x, y)
 
 def main():
-    print("LQR steering control tracking start!!")
+    gain_Q = np.eye(3)
+    gain_Q[0,0] = 54
+    gain_Q[1,1] = 23
+    gain_Q[2,2] = 40
+    gain_R = 0.08*np.eye(3)
+    gain_R[1,1] = 0.08
+    gain_R[2,2] = 0.3
+    # gain_Q = np.eye(3)
+    # gain_Q[0,0] = 65
+    # gain_Q[1,1] = 20
+    # gain_Q[2,2] = 35
+    # gain_R = 0.25*np.eye(3)
+    # gain_R[1,1] = 0.2
+    # gain_R[2,2] = 0.25
+    A = np.diag([1,1,1])
+    
+    mec = mecanum(R,lx,ly)
+    actual_state = np.zeros((3,1))
+    # cx = 5
+    # cy = 0.0
+    # cyaw = 0.0
+    #calculate bezier_path
+    path, _ = calc_4points_bezier_path(
+        start_x, start_y, start_yaw,
+        end_x, end_y, end_yaw,
+        offset
+    )
+    index = 0
+    ax = path[:, 0]
+    ay = path[:, 1]
+    ayaw = np.append(np.arctan2(np.diff(ay), np.diff(ax)), end_yaw)
+    ref_path = np.vstack([path[:, 0], path[:, 1], np.append(np.arctan2(np.diff(path[:, 1]), np.diff(path[:, 0])), end_yaw)])
     ax = [0.0, 2.0,4.0,5.5, 6.2, 8.5, 9.0]
     ay = [0.0, 0.0,-0.0,-0.5, -3.2, -3.0, -1.0]
     goal = [ax[-1], ay[-1]]
+    cx, cy, cyaw, ck, s = cubic_spline_planner.calc_spline_course(ax, ay, ds=0.1)
+    ind,_ = calc_nearest_index(actual_state,cx,cy,cyaw)
+    errorx = [actual_state[0,0]-ref_path[0, 0]]
+    errory = [actual_state[1,0]-ref_path[1, 0]]
+    erroryaw = [actual_state[2,0]-ref_path[2, 0]]
+    hist_x = [actual_state[0,0]]
+    hist_y = [actual_state[1,0]]
+    hist_yaw = [actual_state[2,0]]
+    for i in range(sim_time):
+        if index >=ref_path.shape[1]:
+            index=ref_path.shape[1]-1
+        errorx.append(actual_state[0,0]-ref_path[0, index])
+        errory.append(actual_state[1,0]-ref_path[1, index])
+        erroryaw.append(actual_state[2,0]-ref_path[2, index])
+        B = getB(actual_state[2,0],dt)
+        lqr = LQR_Controller(gain_Q,gain_R,A,B,5)
+        U = lqr.Calculate_lqr(errorx[-1],errory[-1],erroryaw[-1])
+        if (U[0,0] > 3.0):
+            U[0,0] = 3.0
+        if (U[0,0] < -3.0):
+            U[0,0] = -3.0
+        if (U[1,0] > 3.0):
+            U[1,0] = 3.0
+        if (U[1,0] < -3.0):
+            U[1,0] = -3.0
+        if (U[2,0] > 1.57):
+            U[2,0] = 1.57
+        if (U[2,0] < -1.57):
+            U[2,0] = -1.57
+        print(U[0,0])
+        W1,W2,W3,W4 = mec.inverse_kinematic(U[0,0],U[1,0],U[2,0])
+        Vx,Vy,Omega = mec.forward_kinematic(W1,W2,W3,W4)
+        # V= mec.Rotation_matrix(actual_state[2,0],Vx,Vy,Omega) 
+        # Vxr = V[0,0]
+        # Vyr = V[1,0]
+        # Omegar = V[2,0]
 
-    cx, cy, cyaw, ck, s = cubic_spline_planner.calc_spline_course(
-        ax, ay, ds=0.1)
-    
+        Input = np.array([[Vx],[Vy],[Omega]])
+        actual_state = state_space_model(A,actual_state,B,Input)
+        hist_x.append(actual_state[0,0])
+        hist_y.append(actual_state[1,0])
 
-    target_speedx = 10.0 / 3.6  # simulation parameter km/h -> m/s
-    target_speedy = 10.0 / 3.6
-    target_speedyaw = 3.14
-    spx = calc_speed_profile(cyaw, target_speedx)
-    spy = calc_speed_profile(cyaw, target_speedy)
-    spyaw = calc_speed_profile(cyaw, target_speedyaw)
-    
-    t, x, y, yaw, v = do_simulation(cx, cy, cyaw, ck, spx,spy,spyaw, goal)
-
-    if show_animation:  # pragma: no cover
-        plt.close()
-        plt.subplots(1)
-        plt.plot(ax, ay, "xb", label="waypoints")
-        plt.plot(cx, cy, "-r", label="target course")
-        plt.plot(x, y, "-g", label="tracking")
-        plt.grid(True)
+        plt.clf()
+        plt.gcf().canvas.mpl_connect('key_release_event',
+                    lambda event: [exit(0) if event.key == 'escape' else None])
+        plot_arrow(actual_state[0,0], actual_state[1,0], actual_state[2,0])
+        plt.plot(ref_path[0],ref_path[1], marker="x", color="blue", label="Input Trajectory")
+        # plt.plot(cx, cy, "-r", label="course")
+        plt.plot(hist_x, hist_y, color="red", label="LQR Track")
+        plt.title("Velocity of robot [m/sec]:" + str(round(Vx, 2)))
         plt.axis("equal")
-        plt.xlabel("x[m]")
-        plt.ylabel("y[m]")
-        plt.legend()
-
-        plt.subplots(1)
-        plt.plot(s, [np.rad2deg(iyaw) for iyaw in cyaw], "-r", label="yaw")
         plt.grid(True)
         plt.legend()
-        plt.xlabel("line length[m]")
-        plt.ylabel("yaw angle[deg]")
-
-        plt.subplots(1)
-        plt.plot(s, ck, "-r", label="curvature")
-        plt.grid(True)
-        plt.legend()
-        plt.xlabel("line length[m]")
-        plt.ylabel("curvature [1/m]")
-
-        plt.show()
-
+        plt.pause(0.0001)
+        index+=1
 
 if __name__ == '__main__':
     main()
+    
+
+
